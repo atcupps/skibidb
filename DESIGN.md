@@ -20,6 +20,8 @@ The current overarching goal is to create a DBMS that will run on a single machi
 
 SkibiDB will consist of the following general architecture design:
 
+(The design diagram cannot be seen on GitHub; click [here](https://docs.google.com/document/d/154aUyTyEag_ZB08rwzDWC0yV-7S36UtLbFoSDfyln_A/edit?usp=sharing) to see the document on Google Docs.)
+
 # System Flow
 
 ## DBA Controls
