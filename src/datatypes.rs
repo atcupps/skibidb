@@ -36,8 +36,8 @@ pub enum Value {
     Double(f64),
     Decimal(i64, u8),
     Bool(bool),
-    Enum(String, Vec<Value>),
-    Struct(Vec<Value>),
+    Enum(u8, Vec<Value>), // An Enum has a numeric value, and possible data
+    Struct(Vec<Value>),   // A struct is just several fields of values
 }
 
 pub struct Tuple {

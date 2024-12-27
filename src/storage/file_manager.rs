@@ -1,0 +1,267 @@
+use std::collections::HashMap;
+use std::fs::{File, OpenOptions};
+use std::io::{self, Read, Seek, SeekFrom, Write};
+
+/// A `Page` is a portion of a database file which can be read from a database
+/// file, modified in main memory, and written back to the database file.
+/// It consists of a vector of bytes, which has a maximum length of `page_size`
+/// specified in `FileManager`.
+struct Page {
+    data: Vec<u8>,
+    dirty: bool,
+    pin_count: u16,
+}
+
+/// A `FileManager` manages reads and writes to a database file through a
+/// `buffer_pool` of pages.
+struct FileManager {
+    file_path: String,
+    file: File,
+    buffer_pool: HashMap<u64, Page>,
+    page_size: usize,
+    max_pages_in_pool: usize,
+    num_pages: u64,
+}
+
+impl FileManager {
+    /// Creates a new `FileManager` given a `path` to the database File that
+    /// is processed via this `FileManager`. `page_size` specifies the maximum
+    /// number of bytes a `Page` can contain, and `max_pages_in_pool` specifies
+    /// the maximum number of pages that can be held in the buffer pool.
+    pub fn new(path: &str, page_size: usize, max_pages_in_pool: usize) 
+                                                        -> io::Result<Self> {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(path)?;
+
+        let num_pages = file.metadata()?.len() / (page_size as u64);
+
+        Ok(FileManager {
+            file_path: path.to_string(),
+            file,
+            buffer_pool: HashMap::new(),
+            page_size,
+            max_pages_in_pool,
+            num_pages
+        })
+    }
+
+    /// Reads and returns a page of bytes from the file given its `page_id`.
+    /// If the page is not currently in the buffer pool, it will be loaded into
+    /// the buffer pool and another page will be evicted. If a page cannot be
+    /// evicted, then this function will return an error.
+    pub fn read_page(&mut self, page_id: u64) -> io::Result<&[u8]> {
+        // Add the page to the buffer pool if it is not already present
+        if !self.buffer_pool.contains_key(&page_id) {
+            // If buffer pool is full, evict a page
+            while self.buffer_pool.len() >= self.max_pages_in_pool {
+                self.evict_page()?;
+            }
+
+            // Read page from disk
+            let mut page_data = vec![0; self.page_size];
+            self.file.seek(
+                SeekFrom::Start(page_id * (self.page_size as u64))
+            )?;
+            self.file.read_exact(&mut page_data)?;
+
+            // Add page to buffer pool
+            self.buffer_pool.insert(page_id, Page {
+                data: page_data,
+                dirty: false,
+                pin_count: 0
+            });
+        }
+
+        Ok(&self.buffer_pool.get(&page_id).unwrap().data)
+    }
+
+    /// Given bytes `data`, write to the page with the given `page_id` in the
+    /// `FileManager`'s buffer pool. All data in the page will be overwritten,
+    /// and the page will be marked dirty. `data` must have a length exactly
+    /// equal to the `page_size` specified when creating this `FileManager`.
+    /// 
+    /// If the page with the given `page_id` is not in the buffer pool, it is
+    /// added to the buffer pool; if the pool is full and no page can be
+    /// evicted, this function will return an error.
+    /// 
+    /// This function guarantees that if an error is returned, the data has
+    /// **not** been written to the pool.
+    /// 
+    /// **NOTE:** This does **not** write the data to disk. In order to do
+    /// that, call `flush_page` with the given `page_id`.
+    fn write_page_to_pool(&mut self, page_id: u64, data: &[u8]) 
+                                                            -> io::Result<()> {
+        // Reject incorrect size data
+        if data.len() != self.page_size {
+            return Err(
+                io::Error::new(
+                    io::ErrorKind::Other,
+                    format!(
+                        "Length of data: {} did not match expected page size of {} bytes.",
+                        data.len(),
+                        self.page_size
+                    )
+                )
+            );
+        }
+
+        // Add page to buffer pool if it is not present
+        if !self.buffer_pool.contains_key(&page_id) {
+            // If the buffer pool is full, evict items until it has space
+            while self.buffer_pool.len() >= self.max_pages_in_pool {
+                self.evict_page()?;
+            }
+
+            // Add page to buffer pool
+            self.buffer_pool.insert(page_id, Page {
+                data: vec![0; self.page_size],
+                dirty: false,
+                pin_count: 0
+            });
+        }
+
+        // Unwrapping is safe because the item was just added to the pool
+        let page = self.buffer_pool.get_mut(&page_id).unwrap();
+
+        page.data.copy_from_slice(data);
+        page.dirty = true;
+
+        Ok(())
+    }
+
+    /// Allocate a new page in the buffer pool with the `data` provided, and
+    /// write the data to disk. If `data` is `None`, then the data written will
+    /// be an array of 0x0 bytes. If `data` is `Some`, then the data must have
+    /// a length equal to the `FileManager`'s `page_size`, or an error will be
+    /// returned.
+    /// 
+    /// If the buffer pool is full and no pages can be evicted, then an error
+    /// will be returned.
+    /// 
+    /// If the page is allocated in the buffer pool but cannot be written to
+    /// disk, then the page will be removed from the buffer pool as if this
+    /// function was never called.
+    pub fn allocate_page(&mut self, data: Option<&[u8]>) -> io::Result<u64> {
+        if self.num_pages >= (self.max_pages_in_pool as u64) {
+            return Err(
+                io::Error::new(
+                    io::ErrorKind::Other,
+                    "Could not allocate page: Max page limit reached."
+                )
+            );
+        }
+
+        let page_id = self.num_pages + 1;
+        
+        let new_page_data = if let Some(bytes) = data {
+            // Checking bytes page size here is not necessary because it will
+            // be checked by the `write_page` function.
+            bytes
+        } else {
+            &vec![0; self.page_size]
+        };
+
+        self.write_page_to_pool(page_id, new_page_data)?;
+
+        // If everything was successful, increase `num_pages`
+        self.num_pages += 1;
+        Ok(self.num_pages)
+    }
+
+    /// Pins a page in memory; a page can only be removed from the buffer
+    /// pool if no threads have pinned it.
+    pub fn pin_page(&mut self, page_id: u64) -> io::Result<()> {
+        if let Some(page) = self.buffer_pool.get_mut(&page_id) {
+            page.pin_count += 1;
+        } else {
+            // Load the page into memory
+            self.read_page(page_id)?;
+            if let Some(page) = self.buffer_pool.get_mut(&page_id) {
+                page.pin_count += 1;
+            } else {
+                return Err(
+                    io::Error::new(
+                        io::ErrorKind::Other,
+                        "Could not retrieve page from buffer pool."
+                    )
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Unpins a page in the buffer pool and returns the number of pins the
+    /// page has after unpinning. If the page is not present in the buffer
+    /// pool, the function does nothing and returns `None`.
+    pub fn unpin_page(&mut self, page_id: u64) -> Option<u16> {
+        if let Some(page) = self.buffer_pool.get_mut(&page_id) {
+            if page.pin_count > 0 {
+                page.pin_count -= 1;
+            }
+            Some(page.pin_count)
+        } else {
+            None
+        }
+    }
+
+    /// Flushes a specific page to disk if it is dirty.
+    pub fn flush_page(&mut self, page_id: u64) -> io::Result<()> {
+        if let Some(page) = self.buffer_pool.get_mut(&page_id) {
+            if page.dirty {
+                self.file.seek(SeekFrom::Start(page_id * self.page_size as u64))?;
+                self.file.write_all(&page.data)?;
+                page.dirty = false;
+            }
+        }
+        Ok(())
+    }
+
+    /// Flushes all pages in the buffer pool to disk if they are dirty.
+    /// This should be used with caution, especially when writing concurrently,
+    /// because it may disrupt ACID guarantees.
+    pub fn flush_all_pages(&mut self) -> io::Result<()> {
+        for (&page_id, _) in self.buffer_pool.iter() {
+            &self.flush_page(page_id)?;
+        }
+        self.file.sync_all()?;
+        Ok(())
+    }
+
+    /// Evicts a page from the buffer pool. This can only be done if there
+    /// is some page in the pool with 0 pins.
+    fn evict_page(&mut self) -> io::Result<()> {
+        // Find an unpinned page to evict
+        if let Some((&page_id, page)) = self.buffer_pool
+            .iter()
+            .find(|(_, page)| page.pin_count == 0) {
+
+            // Flush if dirty
+            if page.dirty {
+                self.flush_page(page_id)?;
+            }
+            
+            // Remove from buffer pool
+            self.buffer_pool.remove(&page_id);
+        } else {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "No unpinned pages available for eviction"
+            ));
+        }
+        
+        Ok(())
+    }
+}
+
+impl Drop for FileManager {
+    fn drop(&mut self) {
+        // Attempt to flush all pages when FileManager is dropped
+        if let Err(e) = self.flush_all() {
+            eprintln!("Error flushing pages during shutdown: {}", e);
+        }
+    }
+}
