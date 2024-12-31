@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 
+use crate::io_err;
+
 /// A `Page` is a portion of a database file which can be read from a database
 /// file, modified in main memory, and written back to the database file.
 /// It consists of a vector of bytes, which has a maximum length of `page_size`
@@ -14,7 +16,7 @@ struct Page {
 
 /// A `FileManager` manages reads and writes to a database file through a
 /// `buffer_pool` of pages.
-struct FileManager {
+pub struct FileManager {
     file_path: String,
     file: File,
     buffer_pool: HashMap<u64, Page>,
@@ -28,8 +30,25 @@ impl FileManager {
     /// is processed via this `FileManager`. `page_size` specifies the maximum
     /// number of bytes a `Page` can contain, and `max_pages_in_pool` specifies
     /// the maximum number of pages that can be held in the buffer pool.
+    /// `max_pages_in_pool` must be at least 1.
     pub fn new(path: &str, page_size: usize, max_pages_in_pool: usize) 
                                                         -> io::Result<Self> {
+        // ------------------- FIRST: CHECKING ALL ARGS ------------------- //
+        if path.len() < 1 {
+            return io_err!(
+                "Invalid DB file path: length of path string was < 1"
+            );
+        }
+
+        if page_size < 1 {
+            return io_err!("`page_size` must be at least 1 byte.");
+        }
+        
+        if max_pages_in_pool < 1 {
+            return io_err!("`max_pages_in_pool` must be at least 1.");
+        }
+
+        // --------------- NOW: ACTUALLY CREATING THE THING --------------- //
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -96,15 +115,10 @@ impl FileManager {
                                                             -> io::Result<()> {
         // Reject incorrect size data
         if data.len() != self.page_size {
-            return Err(
-                io::Error::new(
-                    io::ErrorKind::Other,
-                    format!(
-                        "Length of data: {} did not match expected page size of {} bytes.",
-                        data.len(),
-                        self.page_size
-                    )
-                )
+            return io_err!(
+                "Length of data: {} did not match expected page size of {} bytes.",
+                data.len(),
+                self.page_size
             );
         }
 
@@ -132,11 +146,7 @@ impl FileManager {
         Ok(())
     }
 
-    /// Allocate a new page in the buffer pool with the `data` provided, and
-    /// write the data to disk. If `data` is `None`, then the data written will
-    /// be an array of 0x0 bytes. If `data` is `Some`, then the data must have
-    /// a length equal to the `FileManager`'s `page_size`, or an error will be
-    /// returned.
+    /// Allocate a new page in the buffer pool.
     /// 
     /// If the buffer pool is full and no pages can be evicted, then an error
     /// will be returned.
@@ -144,27 +154,15 @@ impl FileManager {
     /// If the page is allocated in the buffer pool but cannot be written to
     /// disk, then the page will be removed from the buffer pool as if this
     /// function was never called.
-    pub fn allocate_page(&mut self, data: Option<&[u8]>) -> io::Result<u64> {
+    pub fn allocate_page(&mut self) -> io::Result<u64> {
         if self.num_pages >= (self.max_pages_in_pool as u64) {
-            return Err(
-                io::Error::new(
-                    io::ErrorKind::Other,
-                    "Could not allocate page: Max page limit reached."
-                )
-            );
+            return io_err!("Could not allocate page: Max page limit reached.");
         }
 
         let page_id = self.num_pages + 1;
         
-        let new_page_data = if let Some(bytes) = data {
-            // Checking bytes page size here is not necessary because it will
-            // be checked by the `write_page` function.
-            bytes
-        } else {
-            &vec![0; self.page_size]
-        };
-
-        self.write_page_to_pool(page_id, new_page_data)?;
+        let zeros = vec![0; self.page_size];
+        self.write_page_to_pool(page_id, &zeros)?;
 
         // If everything was successful, increase `num_pages`
         self.num_pages += 1;
@@ -182,12 +180,7 @@ impl FileManager {
             if let Some(page) = self.buffer_pool.get_mut(&page_id) {
                 page.pin_count += 1;
             } else {
-                return Err(
-                    io::Error::new(
-                        io::ErrorKind::Other,
-                        "Could not retrieve page from buffer pool."
-                    )
-                );
+                return io_err!("Could not retrieve page from buffer pool.");
             }
         }
 
@@ -224,9 +217,12 @@ impl FileManager {
     /// This should be used with caution, especially when writing concurrently,
     /// because it may disrupt ACID guarantees.
     pub fn flush_all_pages(&mut self) -> io::Result<()> {
-        for (&page_id, _) in self.buffer_pool.iter() {
-            &self.flush_page(page_id)?;
+        let page_ids: Vec<u64> = self.buffer_pool.keys().copied().collect();
+
+        for page_id in page_ids {
+            self.flush_page(page_id)?;
         }
+
         self.file.sync_all()?;
         Ok(())
     }
@@ -247,10 +243,7 @@ impl FileManager {
             // Remove from buffer pool
             self.buffer_pool.remove(&page_id);
         } else {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "No unpinned pages available for eviction"
-            ));
+            return io_err!("No unpinned pages available for eviction.");
         }
         
         Ok(())
@@ -260,8 +253,47 @@ impl FileManager {
 impl Drop for FileManager {
     fn drop(&mut self) {
         // Attempt to flush all pages when FileManager is dropped
-        if let Err(e) = self.flush_all() {
+        if let Err(e) = self.flush_all_pages() {
             eprintln!("Error flushing pages during shutdown: {}", e);
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_file_manager_new_valid() -> io::Result<()> {
+        let _ = FileManager::new(
+            "fm_test.db",
+            4092,
+            100
+        )?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_file_manager_new_errs() -> io::Result<()> {
+        // Test that an empty string is an invalid input
+        let result = FileManager::new("", 4092, 100);
+        assert!(result.is_err());
+
+        // Test page size
+        let result = FileManager::new("fm_test.db", 0, 402);
+        assert!(result.is_err());
+
+        // Test max_pages_in_pool
+        let result = FileManager::new(
+            "fm_test.db",
+            4092,
+            0
+        );
+        assert!(result.is_err());
+        // ^ It is not necessary to test negative values because
+        // they are not `usize`s in Rust
+
+        Ok(())
     }
 }

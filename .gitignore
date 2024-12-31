@@ -1,5 +1,8 @@
 /target
 
+# Ignore database files
+*.db
+
 # Created by https://www.toptal.com/developers/gitignore/api/macos,windows,visualstudiocode,rust
 # Edit at https://www.toptal.com/developers/gitignore?templates=macos,windows,visualstudiocode,rust
 
