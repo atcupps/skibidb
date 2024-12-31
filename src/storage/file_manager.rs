@@ -95,6 +95,11 @@ impl FileManager {
         }
 
         Ok(&self.buffer_pool.get(&page_id).unwrap().data)
+
+        // Look! a wonderful field of flowers!
+        // ❃✿❀❃✿❀❃✿
+        // ❀❃✿❀❃✿❀❃
+        // ✿❀❃✿❀❃✿❀
     }
 
     /// Given bytes `data`, write to the page with the given `page_id` in the
