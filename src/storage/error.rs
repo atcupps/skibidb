@@ -17,4 +17,7 @@ pub enum StorageError {
 
     #[error("buffer pool is full ({0} pages in pool) and no page can be evicted")]
     BufferPoolFull(u64),
+
+    #[error("cannot delete file while pages are still pinned")]
+    DeleteFileWhilePagesPinned,
 }

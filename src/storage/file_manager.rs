@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::fs::{File, OpenOptions};
+use std::fs::{remove_file, rename, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 
 use crate::{DBError, DBResult};
@@ -263,6 +263,44 @@ impl FileManager {
         }
 
         Ok(())
+    }
+
+    /// Closes and deletes a database file. If any page is still pinned, the
+    /// function will do nothing and return an error. An IO error may also be
+    /// returned. This function does NOT drop the `FileManager`; this is
+    /// because if some pages are still pinned, the `FileManager` should still
+    /// continue to exist. Dropping can be handled by the caller scope.
+    pub fn delete_file(&mut self) -> DBResult<()> {
+        // Check for pinned pages
+        if self.buffer_pool.values().any(|page| page.pin_count > 0) {
+            return Err(DBError::from(StorageError::DeleteFileWhilePagesPinned));
+        }
+
+        // Flush all pages. I don't know if this makes sense.
+        self.flush_all_pages()?;
+
+        // Delete the file
+        remove_file(&self.file_path)?;
+
+        Ok(())
+    }
+
+    /// Rename the file managed by this `FileManager` given the `new_path`;
+    /// consumes the current `FileManager` and returns a new `FileManager` with
+    /// the new path. No pages can be currently pinned; if any page is
+    /// pinned, the function will return an error.
+    pub fn rename_file(mut self, new_path: &str) -> DBResult<FileManager> {
+        // Check for pinned pages
+        if self.buffer_pool.values().any(|page| page.pin_count > 0) {
+            return Err(DBError::from(StorageError::DeleteFileWhilePagesPinned));
+        }
+
+        self.flush_all_pages()?;
+
+        rename(&self.file_path, new_path)?;
+
+        let new_fm = Self::new(new_path, self.page_size, self.max_pages_in_pool)?;
+        Ok(new_fm)
     }
 }
 
