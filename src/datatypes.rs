@@ -18,7 +18,7 @@ pub enum Type {
 }
 
 pub struct Schema {
-    types: Vec<Type>
+    types: Vec<Type>,
 }
 
 pub enum Value {
@@ -41,7 +41,7 @@ pub enum Value {
 }
 
 pub struct Tuple {
-    values: Vec<Value>
+    values: Vec<Value>,
 }
 
 pub struct Table {

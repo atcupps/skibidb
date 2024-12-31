@@ -1,2 +1,6 @@
-pub mod tuple;
-pub mod file_manager;
+mod tuple;
+
+mod file_manager;
+pub use file_manager::FileManager;
+
+pub mod error;
